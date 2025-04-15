@@ -1,19 +1,29 @@
 import asyncio
 import os
+import glob
+import shutil
+from datetime import datetime
+from io import BytesIO
 
-from pyrogram import (Client,
-                      InlineKeyboardButton,
-                      InlineKeyboardMarkup,
-                      ContinuePropagation,
-                      InputMediaDocument,
-                      InputMediaVideo,
-                      InputMediaAudio)
+from pyrogram import Client, ContinuePropagation
+from pyrogram.types import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    InputMediaDocument,
+    InputMediaVideo,
+    InputMediaAudio
+)
 
 from helper.ffmfunc import duration
 from helper.ytdlfunc import downloadvideocli, downloadaudiocli
 from PIL import Image
 from hachoir.metadata import extractMetadata
 from hachoir.parser import createParser
+from utils.telethon_helper import send_file_with_telethon
+
+# Вспомогательная функция для очистки kwargs от нулевых значений
+def clean_kwargs(kwargs):
+    return {k: v for k, v in kwargs.items() if v not in (None, 0, '0')}
 
 @Client.on_callback_query()
 async def catch_youtube_fmtid(c, m):
@@ -48,9 +58,9 @@ async def catch_youtube_dldata(c, q):
     thumb_image_path = "/app/downloads" + \
         "/" + str(q.message.chat.id) + ".jpg"
     print(thumb_image_path)
+    width = 0
+    height = 0
     if os.path.exists(thumb_image_path):
-        width = 0
-        height = 0
         metadata = extractMetadata(createParser(thumb_image_path))
         #print(metadata)
         if metadata.has("width"):
@@ -74,7 +84,7 @@ async def catch_youtube_dldata(c, q):
     if not os.path.isdir(userdir):
         os.makedirs(userdir)
     await q.edit_message_reply_markup(
-        InlineKeyboardMarkup([[InlineKeyboardButton("Downloading...", callback_data="down")]]))
+        InlineKeyboardMarkup([[InlineKeyboardButton("Скачивание...", callback_data="down")]]))
     filepath = os.path.join(userdir, filext)
     # await q.edit_message_reply_markup([[InlineKeyboardButton("Processing..")]])
 
@@ -87,7 +97,6 @@ async def catch_youtube_dldata(c, q):
         "--audio-quality", format_id,
         "-o", filepath,
         yturl,
-
     ]
 
     video_command = [
@@ -100,65 +109,145 @@ async def catch_youtube_dldata(c, q):
 
     loop = asyncio.get_event_loop()
 
-    med = None
+    filename = None
+    file_type = None
+    
     if cb_data.startswith("audio"):
         filename = await downloadaudiocli(audio_command)
-        med = InputMediaAudio(
-            media=filename,
-            thumb=thumb_image_path,
-            caption=os.path.basename(filename),
-            title=os.path.basename(filename)
-        )
-
-    if cb_data.startswith("video"):
+        file_type = "audio"
+    elif cb_data.startswith("video"):
         filename = await downloadvideocli(video_command)
-        dur = round(duration(filename))
-        med = InputMediaVideo(
-            media=filename,
-            duration=dur,
-            width=width,
-            height=height,
-            thumb=thumb_image_path,
-            caption=os.path.basename(filename),
-            supports_streaming=True
-        )
-
-    if cb_data.startswith("docaudio"):
+        file_type = "video"
+    elif cb_data.startswith("docaudio"):
         filename = await downloadaudiocli(audio_command)
-        med = InputMediaDocument(
-            media=filename,
-            thumb=thumb_image_path,
-            caption=os.path.basename(filename),
-        )
-
-    if cb_data.startswith("docvideo"):
+        file_type = "docaudio"
+    elif cb_data.startswith("docvideo"):
         filename = await downloadvideocli(video_command)
-        dur = round(duration(filename))
-        med = InputMediaDocument(
-            media=filename,
-            thumb=thumb_image_path,
-            caption=os.path.basename(filename),
-        )
-    if med:
-        loop.create_task(send_file(c, q, med, filename))
+        file_type = "docvideo"
+    
+    if filename:
+        loop.create_task(send_file_direct(c, q, filename, file_type, thumb_image_path))
     else:
-        print("med not found")
+        await q.edit_message_text("Ошибка: не удалось определить имя итогового файла после скачивания.")
 
 
-async def send_file(c, q, med, filename):
-    print(med)
+async def send_file_direct(c, q, filename, file_type, thumb_path=None):
     try:
         await q.edit_message_reply_markup(
-            InlineKeyboardMarkup([[InlineKeyboardButton("Uploading...", callback_data="down")]]))
-        await c.send_chat_action(chat_id=q.message.chat.id, action="upload_document")
-        # this one is not working
-        await q.edit_message_media(media=med)
+            InlineKeyboardMarkup([[InlineKeyboardButton("Отправка файла...", callback_data="down")]]))
+        
+        # Проверяем существование файла
+        if not os.path.exists(filename):
+            directory = os.path.dirname(filename)
+            basename = os.path.basename(filename)
+            print(f"Ищем файл в каталоге {directory} с базовым именем {basename}")
+            
+            # Ищем файл с таким же расширением
+            if os.path.exists(directory):
+                extension = os.path.splitext(basename)[1].lower()
+                matching_files = []
+                
+                for file in os.listdir(directory):
+                    if file.lower().endswith(extension):
+                        matching_files.append(os.path.join(directory, file))
+                        
+                if matching_files:
+                    # Берем самый новый файл
+                    filename = max(matching_files, key=os.path.getmtime)
+                    print(f"Найден альтернативный файл: {filename}")
+                else:
+                    await q.edit_message_text(f"Ошибка: файл не найден в каталоге {directory}")
+                    return
+            else:
+                await q.edit_message_text(f"Ошибка: каталог {directory} не существует")
+                return
+        
+        # Получаем имя файла для отображения в подписи
+        caption = os.path.basename(filename)
+        chat_id = q.message.chat.id
+        
+        # Обновляем сообщение
+        await q.edit_message_text("Отправка файла через Telethon...")
+        
+        # Определяем, отправлять ли как видео
+        is_video = False
+        if file_type == "video":
+            is_video = True
+        elif file_type not in ["audio", "docaudio", "docvideo"]:
+            # Если тип не задан явно, определяем по расширению
+            ext = os.path.splitext(filename)[1].lower()
+            if ext in ['.mp4', '.mkv', '.webm', '.avi', '.mov']:
+                is_video = True
+        
+        print(f"Отправка файла {filename} (размер: {os.path.getsize(filename) / (1024*1024):.2f} МБ)")
+        
+        # Отправляем файл через Telethon
+        max_retries = 3
+        for attempt in range(1, max_retries + 1):
+            try:
+                print(f"Попытка {attempt} отправить файл")
+                message_id = await send_file_with_telethon(
+                    chat_id,
+                    filename, 
+                    caption=caption,
+                    as_video=is_video,
+                    thumb=thumb_path
+                )
+                
+                if message_id:
+                    print(f"Файл успешно отправлен через Telethon (попытка {attempt})")
+                    # Удаляем сообщение-индикатор после успешной отправки
+                    try:
+                        await q.delete_messages(chat_id, q.message.message_id)
+                    except Exception as del_err:
+                        print(f"Ошибка при удалении сообщения: {del_err}")
+                    return
+                else:
+                    print(f"Попытка {attempt} не удалась, сообщение не получено")
+                    if attempt < max_retries:
+                        await asyncio.sleep(2)  # Пауза перед следующей попыткой
+            except Exception as attempt_err:
+                print(f"Ошибка в попытке {attempt}: {attempt_err}")
+                if attempt < max_retries:
+                    await asyncio.sleep(2)
+        
+        # Если все попытки не удались
+        await q.edit_message_text("Не удалось отправить файл. Пожалуйста, попробуйте еще раз.")
+            
     except Exception as e:
-        print(e)
-        await q.edit_message_text(e)
-    finally:
+        error_msg = f"Общая ошибка: {str(e)}"
+        print(error_msg)
         try:
-            os.remove(filename)
-            os.remove(thumb_image_path)
+            await q.edit_message_text(error_msg)
         except:
             pass
+    finally:
+        # Пытаемся удалить файл только если он не используется Telethon
+        try:
+            import time
+            # Даем время на завершение отправки
+            time.sleep(3)
+            
+            if os.path.exists(filename):
+                try:
+                    os.remove(filename)
+                    print(f"Файл успешно удален: {filename}")
+                except Exception as e:
+                    print(f"Не удалось удалить файл: {e}")
+                    # Запланировать удаление файла позже
+                    try:
+                        import subprocess
+                        command = f'ping localhost -n 10 > nul && del /f "{filename}"'
+                        subprocess.Popen(command, shell=True)
+                        print(f"Запланировано удаление файла через 10 секунд: {filename}")
+                    except Exception as plan_e:
+                        print(f"Не удалось запланировать удаление: {plan_e}")
+            
+            # Удаляем миниатюру, если она существует
+            if thumb_path and os.path.exists(thumb_path):
+                try:
+                    os.remove(thumb_path)
+                except Exception as e:
+                    print(f"Ошибка при удалении миниатюры: {e}")
+        except Exception as cleanup_err:
+            print(f"Ошибка при очистке: {cleanup_err}")

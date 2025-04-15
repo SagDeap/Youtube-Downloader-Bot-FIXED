@@ -27,7 +27,9 @@ def duration(vid_file_path):
     """
     Video's duration in seconds, return a float number
     """
+    print("Путь к файлу для ffprobe:", vid_file_path)
     _json = probe(vid_file_path)
+    print("Результат ffprobe:", _json)
 
     if 'format' in _json:
         if 'duration' in _json['format']:
@@ -39,7 +41,8 @@ def duration(vid_file_path):
             if 'duration' in s:
                 return float(s['duration'])
 
-    raise Exception('duration Not found')
+    print('duration Not found, возвращаю 0')
+    return 0
 
 
 if __name__ == "__main__":

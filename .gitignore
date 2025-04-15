@@ -1,9 +1,50 @@
-downloads/*
-*.session
+# Python bytecode
 __pycache__/
-*.pyc
-log.txt
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+
+# Virtual environments
 venv/
+env/
+ENV/
+
+# IDE files
 .idea/
-pythonenv3.8/
 .vscode/
+*.sublime-project
+*.sublime-workspace
+
+# Logs
+*.log
+
+# Downloads directory
+Downloads/
+downloads/
+
+# Config files with sensitive info (bot tokens, etc)
+config.py
+.env
+sessions/
+*.session
+*.session-journal
+
+# Temporary files
+temp/
+tmp/
+*.tmp
+*.bak
+
+# OS specific files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Bot specific
+*.session
+*.session-journal
+sessions/
